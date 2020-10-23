@@ -18,7 +18,6 @@ import android.view.KeyEvent
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.util.MessageUtil
 import com.v2ray.ang.util.V2rayConfigUtil
-import org.jetbrains.anko.*
 import java.lang.ref.SoftReference
 import java.net.URL
 import android.content.IntentFilter
@@ -27,12 +26,17 @@ import android.support.v4.view.GravityCompat
 import android.support.v7.app.ActionBarDrawerToggle
 import android.support.v7.widget.helper.ItemTouchHelper
 import android.util.Log
-//import com.v2ray.ang.InappBuyActivity
+import com.v2ray.ang.BuildConfig
+import com.v2ray.ang.dto.EConfigType
+import com.v2ray.ang.extension.defaultDPreference
+import com.v2ray.ang.extension.toast
 import rx.Observable
 import rx.android.schedulers.AndroidSchedulers
 import java.util.concurrent.TimeUnit
 import com.v2ray.ang.helper.SimpleItemTouchHelperCallback
 import com.v2ray.ang.util.AngConfigManager.configs
+import kotlinx.coroutines.*
+import libv2ray.Libv2ray
 
 class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedListener {
     companion object {
@@ -47,10 +51,10 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
             field = value
             adapter.changeable = !value
             if (value) {
-                fab.imageResource = R.drawable.ic_v
+                fab.setImageResource(R.drawable.ic_v)
                 tv_test_state.text = getString(R.string.connection_connected)
             } else {
-                fab.imageResource = R.drawable.ic_v_idle
+                fab.setImageResource(R.drawable.ic_v_idle)
                 tv_test_state.text = getString(R.string.connection_not_connected)
             }
             hideCircle()
@@ -58,6 +62,7 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
 
     private val adapter by lazy { MainRecyclerAdapter(this) }
     private var mItemTouchHelper: ItemTouchHelper? = null
+    private val tcpingTestScope by lazy { CoroutineScope(Dispatchers.IO) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -68,13 +73,15 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
         fab.setOnClickListener {
             if (isRunning) {
                 Utils.stopVService(this)
-            } else {
+            } else if (defaultDPreference.getPrefString(AppConfig.PREF_MODE, "VPN") == "VPN") {
                 val intent = VpnService.prepare(this)
                 if (intent == null) {
                     startV2Ray()
                 } else {
                     startActivityForResult(intent, REQUEST_CODE_VPN_PREPARE)
                 }
+            } else {
+                startV2Ray()
             }
         }
         layout_test.setOnClickListener {
@@ -82,9 +89,9 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
                 val socksPort = 10808//Utils.parseInt(defaultDPreference.getPrefString(SettingsActivity.PREF_SOCKS_PORT, "10808"))
 
                 tv_test_state.text = getString(R.string.connection_test_testing)
-                doAsync {
+                GlobalScope.launch(Dispatchers.IO) {
                     val result = Utils.testConnection(this@MainActivity, socksPort)
-                    uiThread {
+                    launch(Dispatchers.Main) {
                         tv_test_state.text = Utils.getEditable(result)
                     }
                 }
@@ -107,6 +114,7 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
         drawer_layout.addDrawerListener(toggle)
         toggle.syncState()
         nav_view.setNavigationItemSelectedListener(this)
+        version.text = "v${BuildConfig.VERSION_NAME} (${Libv2ray.checkVersionX()})"
     }
 
     fun startV2Ray() {
@@ -162,8 +170,8 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
                     importBatchConfig(data?.getStringExtra("SCAN_RESULT"))
                 }
             REQUEST_FILE_CHOOSER -> {
-                if (resultCode == RESULT_OK) {
-                    val uri = data!!.data
+                val uri = data?.data
+                if (resultCode == RESULT_OK && uri != null) {
                     readContentFromUri(uri)
                 }
             }
@@ -179,6 +187,9 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
         return true
     }
 
+    private fun getOptionIntent() = Intent().putExtra("position", -1)
+            .putExtra("isRunning", isRunning)
+
     override fun onOptionsItemSelected(item: MenuItem) = when (item.itemId) {
         R.id.import_qrcode -> {
             importQRcode(REQUEST_SCAN)
@@ -189,17 +200,17 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
             true
         }
         R.id.import_manually_vmess -> {
-            startActivity<ServerActivity>("position" to -1, "isRunning" to isRunning)
+            startActivity(getOptionIntent().setClass(this, ServerActivity::class.java))
             adapter.updateConfigList()
             true
         }
         R.id.import_manually_ss -> {
-            startActivity<Server3Activity>("position" to -1, "isRunning" to isRunning)
+            startActivity(getOptionIntent().setClass(this, Server3Activity::class.java))
             adapter.updateConfigList()
             true
         }
         R.id.import_manually_socks -> {
-            startActivity<Server4Activity>("position" to -1, "isRunning" to isRunning)
+            startActivity(getOptionIntent().setClass(this, Server4Activity::class.java))
             adapter.updateConfigList()
             true
         }
@@ -240,15 +251,25 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
         }
 
         R.id.ping_all -> {
+            tcpingTestScope.coroutineContext[Job]?.cancelChildren()
+            Utils.closeAllTcpSockets()
             for (k in 0 until configs.vmess.count()) {
                 configs.vmess[k].testResult = ""
                 adapter.updateConfigList()
             }
             for (k in 0 until configs.vmess.count()) {
-                if (configs.vmess[k].configType != AppConfig.EConfigType.Custom) {
-                    doAsync {
-                        configs.vmess[k].testResult = Utils.tcping(configs.vmess[k].address, configs.vmess[k].port)
-                        uiThread {
+                var serverAddress = configs.vmess[k].address
+                var serverPort = configs.vmess[k].port
+                if (configs.vmess[k].configType == EConfigType.CUSTOM.value) {
+                    val serverOutbound = V2rayConfigUtil.getCustomConfigServerOutbound(applicationContext, configs.vmess[k].guid)
+                            ?: continue
+                    serverAddress = serverOutbound.getServerAddress() ?: continue
+                    serverPort = serverOutbound.getServerPort() ?: continue
+                }
+                tcpingTestScope.launch {
+                    configs.vmess.getOrNull(k)?.let {  // check null in case array is modified during testing
+                        it.testResult = Utils.tcping(serverAddress, serverPort)
+                        launch(Dispatchers.Main) {
                             adapter.updateSelectedItem(k)
                         }
                     }
@@ -282,7 +303,7 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
                 .request(Manifest.permission.CAMERA)
                 .subscribe {
                     if (it)
-                        startActivityForResult<ScannerActivity>(requestCode)
+                        startActivityForResult(Intent(this, ScannerActivity::class.java), requestCode)
                     else
                         toast(R.string.toast_permission_denied)
                 }
@@ -368,9 +389,14 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
                 toast(R.string.toast_invalid_url)
                 return false
             }
-            doAsync {
-                val configText = URL(url).readText()
-                uiThread {
+            GlobalScope.launch(Dispatchers.IO) {
+                val configText = try {
+                    URL(url).readText()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    ""
+                }
+                launch(Dispatchers.Main) {
                     importCustomizeConfig(configText)
                 }
             }
@@ -402,9 +428,14 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
                     continue
                 }
                 Log.d("Main", url)
-                doAsync {
-                    val configText = URL(url).readText()
-                    uiThread {
+                GlobalScope.launch(Dispatchers.IO) {
+                    val configText = try {
+                        URL(url).readText()
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        ""
+                    }
+                    launch(Dispatchers.Main) {
                         importBatchConfig(Utils.decode(configText), id)
                     }
                 }
@@ -442,9 +473,10 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
                 .subscribe {
                     if (it) {
                         try {
-                            val inputStream = contentResolver.openInputStream(uri)
-                            val configText = inputStream.bufferedReader().readText()
-                            importCustomizeConfig(configText)
+                            contentResolver.openInputStream(uri).use {
+                                val configText = it?.bufferedReader()?.readText()
+                                importCustomizeConfig(configText)
+                            }
                         } catch (e: Exception) {
                             e.printStackTrace()
                         }
@@ -549,10 +581,11 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
         when (item.itemId) {
             //R.id.server_profile -> activityClass = MainActivity::class.java
             R.id.sub_setting -> {
-                startActivity<SubSettingActivity>()
+                startActivity(Intent(this, SubSettingActivity::class.java))
             }
             R.id.settings -> {
-                startActivity<SettingsActivity>("isRunning" to isRunning)
+                startActivity(Intent(this, SettingsActivity::class.java)
+                        .putExtra("isRunning", isRunning))
             }
             R.id.feedback -> {
                 Utils.openUri(this, AppConfig.v2rayNGIssues)
@@ -564,7 +597,7 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
 //                startActivity<InappBuyActivity>()
             }
             R.id.logcat -> {
-                startActivity<LogcatActivity>()
+                startActivity(Intent(this, LogcatActivity::class.java))
             }
         }
         drawer_layout.closeDrawer(GravityCompat.START)
