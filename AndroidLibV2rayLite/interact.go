@@ -17,7 +17,6 @@ import (
 	v2filesystem "v2ray.com/core/common/platform/filesystem"
 	v2stats "v2ray.com/core/features/stats"
 	v2serial "v2ray.com/core/infra/conf/serial"
-	_ "v2ray.com/core/main/distro/all"
 	v2internet "v2ray.com/core/transport/internet"
 
 	v2applog "v2ray.com/core/app/log"
@@ -99,9 +98,7 @@ func (v *V2RayPoint) StopLoop() (err error) {
 	v.v2rayOP.Lock()
 	defer v.v2rayOP.Unlock()
 	if v.status.IsRunning {
-		close(v.closeChan)
 		v.shutdownInit()
-		v.SupportSet.OnEmitStatus(0, "Closed")
 	}
 	return
 }
@@ -109,6 +106,10 @@ func (v *V2RayPoint) StopLoop() (err error) {
 //Delegate Funcation
 func (v *V2RayPoint) GetIsRunning() bool {
 	return v.status.IsRunning
+}
+
+func (v *V2RayPoint) GetIsTRunning() bool {
+	return v.status.IsTRunning
 }
 
 //Delegate Funcation
@@ -124,12 +125,16 @@ func (v V2RayPoint) QueryStats(tag string, direct string) int64 {
 }
 
 func (v *V2RayPoint) shutdownInit() {
-	v.status.IsRunning = false
+	close(v.closeChan)
+	v.statsManager = nil
 	v.status.Vpoint.Close()
 	v.status.Vpoint = nil
-	v.statsManager = nil
+	v.status.IsRunning = false
+
 	v.escorter.EscortingDown()
+
 	v.SupportSet.Shutdown()
+	v.SupportSet.OnEmitStatus(0, "Closed")
 }
 
 func (v *V2RayPoint) pointloop() error {
@@ -161,11 +166,13 @@ func (v *V2RayPoint) pointloop() error {
 	v.SupportSet.Setup(v.status.GetVPNSetupArg(v.EnableLocalDNS, v.ForwardIpv6))
 	v.SupportSet.OnEmitStatus(0, "Running")
 
+	v.status.IsTRunning = false
 	if !v.ProxyOnly {
 		if err := v.runTun2socks(); err != nil {
 			log.Println(err)
 			return err
 		}
+		v.status.IsTRunning = true
 
 		log.Printf("EnableLocalDNS: %v\nForwardIpv6: %v\nDomainName: %s",
 			v.EnableLocalDNS,

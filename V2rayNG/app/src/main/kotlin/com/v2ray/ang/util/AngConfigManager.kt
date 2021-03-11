@@ -2,6 +2,7 @@ package com.v2ray.ang.util
 
 import android.graphics.Bitmap
 import android.text.TextUtils
+import android.util.Log
 import com.google.gson.Gson
 import com.v2ray.ang.AngApplication
 import com.v2ray.ang.AppConfig
@@ -154,6 +155,10 @@ object AngConfigManager {
             angConfig.index = index
             app.curIndex = index
             storeConfigFile()
+            if (!genStoreV2rayConfig()) {
+                Log.d(AppConfig.ANG_PACKAGE, "set active index $index but generate full configuration failed!")
+                return -1
+            }
         } catch (e: Exception) {
             e.printStackTrace()
             app.curIndex = -1
@@ -174,35 +179,32 @@ object AngConfigManager {
         }
     }
 
+    fun genStoreV2rayConfigIfActive(index: Int) {
+        if (index == configs.index) {
+            if (!genStoreV2rayConfig()) {
+                Log.d(AppConfig.ANG_PACKAGE, "update config $index but generate full configuration failed!")
+            }
+        }
+    }
+
     /**
      * gen and store v2ray config file
      */
-    fun genStoreV2rayConfig(index: Int): Boolean {
+    fun genStoreV2rayConfig(): Boolean {
         try {
-            if (angConfig.index < 0
-                    || angConfig.vmess.count() <= 0
-                    || angConfig.index > angConfig.vmess.count() - 1
-            ) {
-                return false
-            }
-            var index2 = angConfig.index
-            if (index >= 0) {
-                index2 = index
-            }
-
-            val result = V2rayConfigUtil.getV2rayConfig(app, angConfig.vmess[index2])
-            if (result.status) {
-                app.defaultDPreference.setPrefString(PREF_CURR_CONFIG, result.content)
-                app.defaultDPreference.setPrefString(PREF_CURR_CONFIG_GUID, currConfigGuid())
-                app.defaultDPreference.setPrefString(PREF_CURR_CONFIG_NAME, currConfigName())
-                return true
-            } else {
-                return false
+            angConfig.vmess.getOrNull(angConfig.index)?.let {
+                val result = V2rayConfigUtil.getV2rayConfig(app, it)
+                if (result.status) {
+                    app.defaultDPreference.setPrefString(PREF_CURR_CONFIG, result.content)
+                    app.defaultDPreference.setPrefString(PREF_CURR_CONFIG_GUID, currConfigGuid())
+                    app.defaultDPreference.setPrefString(PREF_CURR_CONFIG_NAME, currConfigName())
+                    return true
+                }
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            return false
         }
+        return false
     }
 
     fun currGeneratedV2rayConfig(): String {
@@ -318,7 +320,7 @@ object AngConfigManager {
                     result = Utils.decode(result)
                 }
 
-                val legacyPattern = "^(.+?):(.*)@(.+?):(\\d+?)$".toRegex()
+                val legacyPattern = "^(.+?):(.*)@(.+?):(\\d+?)/?$".toRegex()
                 val match = legacyPattern.matchEntire(result)
                 if (match == null) {
                     return R.string.toast_incorrect_protocol
@@ -586,9 +588,9 @@ object AngConfigManager {
      */
     fun shareFullContent2Clipboard(index: Int): Int {
         try {
-            if (AngConfigManager.genStoreV2rayConfig(index)) {
-                val configContent = app.defaultDPreference.getPrefString(AppConfig.PREF_CURR_CONFIG, "")
-                Utils.setClipboard(app.applicationContext, configContent)
+            val result = V2rayConfigUtil.getV2rayConfig(app, angConfig.vmess[index])
+            if (result.status) {
+                Utils.setClipboard(app.applicationContext, result.content)
             } else {
                 return -1
             }

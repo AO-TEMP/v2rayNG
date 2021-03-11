@@ -69,40 +69,32 @@ class Server2Activity : BaseActivity() {
      * save server config
      */
     fun saveServer(): Boolean {
-        var saveSuccess: Boolean
         val vmess = configs.vmess[edit_index]
 
         vmess.remarks = et_remarks.text.toString()
 
         if (TextUtils.isEmpty(vmess.remarks)) {
             toast(R.string.server_lab_remarks)
-            saveSuccess = false
+            return false
         }
-
-
-        if (AngConfigManager.addCustomServer(vmess, edit_index) == 0) {
-            toast(R.string.toast_success)
-            saveSuccess = true
-        } else {
-            toast(R.string.toast_failure)
-            saveSuccess = false
-        }
-
 
         try {
             Gson().fromJson<Object>(tv_content.text.toString(), Object::class.java)
         } catch (e: Exception) {
             e.printStackTrace()
             toast(R.string.toast_malformed_josn)
-            saveSuccess = false
+            return false
         }
 
-        if (saveSuccess) {
+        if (AngConfigManager.addCustomServer(vmess, edit_index) == 0) {
             //update config
             defaultDPreference.setPrefString(AppConfig.ANG_CONFIG + edit_guid, tv_content.text.toString())
+            AngConfigManager.genStoreV2rayConfigIfActive(edit_index)
+            toast(R.string.toast_success)
             finish()
             return true
         } else {
+            toast(R.string.toast_failure)
             return false
         }
     }
