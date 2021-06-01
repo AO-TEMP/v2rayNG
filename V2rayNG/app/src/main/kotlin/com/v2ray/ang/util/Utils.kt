@@ -15,28 +15,25 @@ import android.content.ClipData
 import android.content.Intent
 import android.net.Uri
 import android.os.SystemClock
-import android.text.TextUtils
 import android.util.Log
 import android.util.Patterns
 import android.webkit.URLUtil
-import com.v2ray.ang.AngApplication
+import com.tencent.mmkv.MMKV
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.R
-import com.v2ray.ang.extension.defaultDPreference
 import com.v2ray.ang.extension.responseLength
 import com.v2ray.ang.extension.toast
-import com.v2ray.ang.extension.v2RayApplication
 import com.v2ray.ang.service.V2RayServiceManager
-import com.v2ray.ang.ui.SettingsActivity
 import kotlinx.coroutines.isActive
-import me.dozen.dpreference.DPreference
 import java.io.IOException
 import java.net.*
 import kotlin.coroutines.coroutineContext
 
 object Utils {
 
-    val tcpTestingSockets = ArrayList<Socket?>()
+    private val mainStorage by lazy { MMKV.mmkvWithID(MmkvManager.ID_MAIN, MMKV.MULTI_PROCESS_MODE) }
+    private val settingsStorage by lazy { MMKV.mmkvWithID(MmkvManager.ID_SETTING, MMKV.MULTI_PROCESS_MODE) }
+    private val tcpTestingSockets = ArrayList<Socket?>()
 
     /**
      * convert string to editalbe for kotlin
@@ -125,41 +122,31 @@ object Utils {
     /**
      * get remote dns servers from preference
      */
-    fun getRemoteDnsServers(defaultDPreference: DPreference): ArrayList<String> {
-        val remoteDns = defaultDPreference.getPrefString(SettingsActivity.PREF_REMOTE_DNS, AppConfig.DNS_AGENT)
-        val ret = ArrayList<String>()
-        if (!TextUtils.isEmpty(remoteDns)) {
-            remoteDns
-                    .split(",")
-                    .forEach {
-                        if (Utils.isPureIpAddress(it)) {
-                            ret.add(it)
-                        }
-                    }
-        }
-        if (ret.size == 0) {
-            ret.add(AppConfig.DNS_AGENT)
+    fun getRemoteDnsServers(): List<String> {
+        val remoteDns = settingsStorage?.decodeString(AppConfig.PREF_REMOTE_DNS) ?: AppConfig.DNS_AGENT
+        val ret = remoteDns.split(",").filter { isPureIpAddress(it) || it.startsWith("https") }
+        if (ret.isEmpty()) {
+            return listOf(AppConfig.DNS_AGENT)
         }
         return ret
+    }
+
+    fun getVpnDnsServers(): List<String> {
+        val vpnDns = settingsStorage?.decodeString(AppConfig.PREF_VPN_DNS)
+                ?: settingsStorage?.decodeString(AppConfig.PREF_REMOTE_DNS)
+                ?: AppConfig.DNS_AGENT
+        return vpnDns.split(",").filter { isPureIpAddress(it) }
+        // allow empty, in that case dns will use system default
     }
 
     /**
      * get remote dns servers from preference
      */
-    fun getDomesticDnsServers(defaultDPreference: DPreference): ArrayList<String> {
-        val domesticDns = defaultDPreference.getPrefString(SettingsActivity.PREF_DOMESTIC_DNS, AppConfig.DNS_DIRECT)
-        val ret = ArrayList<String>()
-        if (!TextUtils.isEmpty(domesticDns)) {
-            domesticDns
-                    .split(",")
-                    .forEach {
-                        if (Utils.isPureIpAddress(it)) {
-                            ret.add(it)
-                        }
-                    }
-        }
-        if (ret.size == 0) {
-            ret.add(AppConfig.DNS_DIRECT)
+    fun getDomesticDnsServers(): List<String> {
+        val domesticDns = settingsStorage?.decodeString(AppConfig.PREF_DOMESTIC_DNS) ?: AppConfig.DNS_DIRECT
+        val ret = domesticDns.split(",").filter { isPureIpAddress(it) || it.startsWith("https") }
+        if (ret.isEmpty()) {
+            return listOf(AppConfig.DNS_DIRECT)
         }
         return ret
     }
@@ -260,7 +247,7 @@ object Utils {
      */
     fun isValidUrl(value: String?): Boolean {
         try {
-            if (Patterns.WEB_URL.matcher(value).matches() || URLUtil.isValidUrl(value)) {
+            if (value != null && Patterns.WEB_URL.matcher(value).matches() || URLUtil.isValidUrl(value)) {
                 return true
             }
         } catch (e: WriterException) {
@@ -271,29 +258,8 @@ object Utils {
     }
 
     fun startVServiceFromToggle(context: Context): Boolean {
-        val result = context.defaultDPreference.getPrefString(AppConfig.PREF_CURR_CONFIG, "")
-        if (result.isBlank()) {
+        if (mainStorage?.decodeString(MmkvManager.KEY_SELECTED_SERVER).isNullOrEmpty()) {
             context.toast(R.string.app_tile_first_use)
-            return false
-        }
-        V2RayServiceManager.startV2Ray(context)
-        return true
-    }
-
-    /**
-     * startVService
-     */
-    fun startVService(context: Context, guid: String): Boolean {
-        val index = AngConfigManager.getIndexViaGuid(guid)
-        context.v2RayApplication.curIndex=index
-        return startVService(context, index)
-    }
-
-    /**
-     * startVService
-     */
-    fun startVService(context: Context, index: Int): Boolean {
-        if (AngConfigManager.setActiveServer(index) < 0) {
             return false
         }
         V2RayServiceManager.startV2Ray(context)
@@ -399,8 +365,8 @@ object Utils {
     /**
      * readTextFromAssets
      */
-    fun readTextFromAssets(app: AngApplication, fileName: String): String {
-        val content = app.assets.open(fileName).bufferedReader().use {
+    fun readTextFromAssets(context: Context, fileName: String): String {
+        val content = context.assets.open(fileName).bufferedReader().use {
             it.readText()
         }
         return content
@@ -414,7 +380,7 @@ object Utils {
             val command = "/system/bin/ping -c 3 $url"
             val process = Runtime.getRuntime().exec(command)
             val allText = process.inputStream.bufferedReader().use { it.readText() }
-            if (!TextUtils.isEmpty(allText)) {
+            if (allText.isNotBlank()) {
                 val tempInfo = allText.substring(allText.indexOf("min/avg/max/mdev") + 19)
                 val temps = tempInfo.split("/".toRegex()).dropLastWhile({ it.isEmpty() }).toTypedArray()
                 if (temps.count() > 0 && temps[0].length < 10) {
@@ -430,19 +396,18 @@ object Utils {
     /**
      * tcping
      */
-    suspend fun tcping(url: String, port: Int): String {
+    suspend fun tcping(url: String, port: Int): Long {
         var time = -1L
         for (k in 0 until 2) {
             val one = socketConnectTime(url, port)
             if (!coroutineContext.isActive) {
                 break
             }
-            if (one != -1L  )
-                if(time == -1L || one < time) {
+            if (one != -1L && (time == -1L || one < time)) {
                 time = one
             }
         }
-        return time.toString() + "ms"
+        return time
     }
 
     fun socketConnectTime(url: String, port: Int): Long {
